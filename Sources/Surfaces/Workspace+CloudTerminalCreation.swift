@@ -1,3 +1,4 @@
+import AppKit
 import Bonsplit
 import CmuxWorkspaces
 import Foundation
@@ -16,6 +17,19 @@ import Foundation
 /// same grace a reconnect uses, and a failure is explained inside the pane with Retry.
 @MainActor
 extension Workspace {
+    /// The pane that initiated the request owns its error, regardless of later
+    /// focus changes. A hidden source tab must not cover the tab replacing it.
+    var cloudPaneCreationFailureSourceView: NSView? {
+        guard let panelID = cloudPaneCreationFailureStore.failure?.sourcePanelID,
+              let paneID = paneId(forPanelId: panelID),
+              let surfaceID = surfaceIdFromPanelId(panelID),
+              bonsplitController.selectedTab(inPane: paneID)?.id == surfaceID else { return nil }
+        if let terminal = panels[panelID] as? TerminalPanel { return terminal.hostedView }
+        if let browser = panels[panelID] as? BrowserPanel { return browser.webView }
+        return nil
+    }
+
+
     /// The cloud resource behind a panel, when the panel projects one.
     func cloudProjectedResource(forPanel panelID: UUID, catalog: SurfaceCatalog? = nil) -> SurfaceResource? {
         let catalog = catalog ?? .shared
@@ -195,10 +209,10 @@ extension Workspace {
 
     /// Publishes a non-modal failure card for a cloud terminal request.
     @MainActor
-    func presentCloudPaneCreationFailure(machine: SurfaceMachineID, error: Error, requestID: UUID) {
+    func presentCloudPaneCreationFailure(machine: SurfaceMachineID, error: Error, requestID: UUID, context: CloudOperationContext? = nil, sourcePanelID: UUID? = nil) {
         #if DEBUG
         cmuxDebugLog("cloud.pane.createFailed machine=\(machine.rawValue) error=\(String(reflecting: error))")
         #endif
-        cloudPaneCreationFailureStore.present(machine: machine, error: error, requestID: requestID)
+        cloudPaneCreationFailureStore.present(machine: machine, error: error, requestID: requestID, context: context, sourcePanelID: sourcePanelID ?? focusedPanelId)
     }
 }

@@ -106,7 +106,7 @@ final class MachinesPanelViewModel: ObservableObject {
     /// Per-machine coderouter spend from the last successful usage fetch,
     /// keyed by machine id. Refreshed with every machine-list refresh (the
     /// slow poll and the explicit Refresh verb), never more often. Empty on
-    /// backends without the usage route; a failed fetch keeps the last value.
+    /// backends without the usage route; a failed fetch clears stale values.
     @Published private(set) var usageByMachineID: [String: MachineUsageSnapshot] = [:]
 
     enum CloudListProblem: Equatable {
@@ -192,6 +192,8 @@ final class MachinesPanelViewModel: ObservableObject {
     private var pollTask: Task<Void, Never>?
     private var statsTask: Task<Void, Never>?
     private var usageTask: Task<Void, Never>?
+    private var usageFailureCount = 0
+    private var usageRetryNotBefore: Date?
     /// One-shot timer armed at the exact next free-access transition (a
     /// countdown day-boundary or an expiry). Expiry is client-computable from
     /// createdAt + window, so rows flip at the boundary itself — scheduling,
@@ -202,6 +204,9 @@ final class MachinesPanelViewModel: ObservableObject {
     /// these on every local recompute without another round trip.
     private var lastLimits: VMPlanLimits?
     var memoryOptionsMb: [Int] { lastLimits?.memoryOptionsMb ?? [] }
+    var lockedMemoryOptionsMb: [Int]? { lastLimits?.lockedMemoryOptionsMb }
+    var memoryUpgradePlanId: String? { lastLimits?.memoryUpgradePlanId }
+    var memoryUpgradePlansByMb: [String: String]? { lastLimits?.memoryUpgradePlansByMb }
     private var authSignOutObserver: NSObjectProtocol?
     private var networkObserver: NSObjectProtocol?
     private var featureFlagObserver: CloudFeatureAvailabilityObserver?
@@ -281,7 +286,6 @@ final class MachinesPanelViewModel: ObservableObject {
             }
         }
     }
-
     /// Catalog changes arrive in bursts (a link snapshot upserts dozens of resources, a
     /// projection records, titles tick). Collapse them to one `readCatalog()` per
     /// main-runloop turn, and none at all while the outline is being dragged — the
@@ -289,7 +293,6 @@ final class MachinesPanelViewModel: ObservableObject {
     private var pendingCatalogRead = false
     private var catalogReadSuppressedByDrag = false
     private(set) var isTreeDragging = false
-
     func scheduleCatalogRead() {
         guard !pendingCatalogRead else { return }
         pendingCatalogRead = true
@@ -303,7 +306,6 @@ final class MachinesPanelViewModel: ObservableObject {
             self.readCatalog()
         }
     }
-
     func setTreeDragging(_ dragging: Bool) {
         guard isTreeDragging != dragging else { return }
         isTreeDragging = dragging
@@ -312,7 +314,6 @@ final class MachinesPanelViewModel: ObservableObject {
             readCatalog()
         }
     }
-
     deinit {
         refreshTask?.cancel()
         pollTask?.cancel()
@@ -334,7 +335,6 @@ final class MachinesPanelViewModel: ObservableObject {
             NotificationCenter.default.removeObserver(createChangeObserver)
         }
     }
-
     /// Mirrors the coordinator's rows. A completion also re-reads the fleet so
     /// the real machine row replaces the pending one without waiting for the
     /// slow poll; a machine that was created but could not be opened lands its
@@ -353,7 +353,6 @@ final class MachinesPanelViewModel: ObservableObject {
         }
         if wantsPolling { refresh() }
     }
-
     /// Publishes the catalog's current value and the local workspace list. Cheap
     /// (a value read), so every change notification may call it.
     func readCatalog() {
@@ -363,7 +362,6 @@ final class MachinesPanelViewModel: ObservableObject {
         // state, so a catalog read also refreshes it. Cheap: a dictionary read.
         readUnreadTerminalIDs()
     }
-
     private func readUnreadTerminalIDs() {
         let unread = CloudNotificationSyncHub.shared.unreadTerminalIDs
         guard unread != unreadTerminalIDs else { return }
@@ -372,7 +370,6 @@ final class MachinesPanelViewModel: ObservableObject {
         #endif
         unreadTerminalIDs = unread
     }
-
     /// The explicit Refresh verb re-syncs every provider and reads the catalog.
     func refreshTree(force: Bool) {
         treeTask?.cancel()
@@ -385,14 +382,12 @@ final class MachinesPanelViewModel: ObservableObject {
             self.readCatalog()
         }
     }
-
     /// `refresh(tree: true)` refreshes machines, stats, and the catalog.
     func refresh(tree forceTree: Bool) {
         refresh()
         refreshTree(force: forceTree)
     }
     func refreshMachine(_ machine: SurfaceMachineID) { machineRefreshes.refresh(machine) }
-
     /// Samples machines advertising stats support. Sleeping machines report
     /// `asleep` without being woken, so polling never costs the user anything.
     /// Older servers omitting the flag retain the desktop-only polling policy
@@ -426,32 +421,34 @@ final class MachinesPanelViewModel: ObservableObject {
             if self.machines.filter({ $0.capabilities.stats }).map(\.id) != ids { self.refreshStats() }
         }
     }
-    /// Fetches the team's per-machine coderouter spend and stamps it onto the
-    /// rows. Rides the machine-list refresh, so it shares that cadence. Any
-    /// failure (404 on a backend without the route, network) clears the readout.
-    /// Concurrent callers share the usage client's owned request.
     func refreshUsage() {
-        guard isCloudEnabled() else { return }
-        guard usageTask == nil else { return }
+        guard isCloudEnabled(), usageTask == nil else { return }
+        if let retryNotBefore = usageRetryNotBefore, retryNotBefore > Date() { return }
         guard let client = MachineUsageClient.shared else { return }
         usageTask = Task { [weak self] in
-            // A failed refresh clears the readout: a stale spend figure is
-            // worse than none, and the next poll restores it.
-            let usage = (try? await client.teamUsage())?.byMachineID ?? [:]
-            guard !Task.isCancelled, let self, self.isCloudEnabled() else { return }
-            self.applyUsage(usage)
-            self.usageTask = nil
+            defer { if !Task.isCancelled { self?.usageTask = nil } }
+            do {
+                let usage = (try await client.teamUsage()).byMachineID
+                guard !Task.isCancelled, let self, self.isCloudEnabled() else { return }
+                self.usageFailureCount = 0; self.usageRetryNotBefore = nil
+                self.applyUsage(usage)
+            } catch is CancellationError { return } catch {
+                guard !Task.isCancelled, let self else { return }
+                self.applyUsage([:])
+                self.usageFailureCount = min(self.usageFailureCount + 1, 4)
+                self.usageRetryNotBefore = Date().addingTimeInterval(Self.usageBackoffDelay(failureCount: self.usageFailureCount))
+            }
         }
     }
-
+    nonisolated static func usageBackoffDelay(failureCount: Int) -> TimeInterval {
+        [30, 30, 60, 120, 300][min(max(failureCount, 0), 4)]
+    }
     /// The one place usage lands: the lookup and the row snapshots move together.
     func applyUsage(_ usage: [String: MachineUsageSnapshot]) {
         usageByMachineID = usage
         machines = MachineSnapshotBuilder.applyingUsage(to: machines, usage: usage)
     }
-
     private static let pollInterval: Duration = .seconds(45)
-
     /// A refresh asked for while one is in flight runs again afterwards: a
     /// create that lands mid-poll must still replace its pending row with the
     /// real machine now, not on the next 45 s sweep.
@@ -480,7 +477,6 @@ final class MachinesPanelViewModel: ObservableObject {
             }
         }
     }
-
     func startPolling() {
         wantsPolling = true
         guard isCloudEnabled() else {
@@ -517,6 +513,8 @@ final class MachinesPanelViewModel: ObservableObject {
         statsTask = nil
         usageTask?.cancel()
         usageTask = nil
+        usageFailureCount = 0
+        usageRetryNotBefore = nil
         treeTask?.cancel()
         treeTask = nil
         machineRefreshes.cancelAll()
