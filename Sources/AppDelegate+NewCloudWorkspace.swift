@@ -1,8 +1,9 @@
 import AppKit
 import CmuxCloudMachines
 import Foundation
+import os
 
-// MARK: - New Cloud Workspace (Cmd+Y)
+// MARK: - Cloud creation actions
 
 extension AppDelegate {
     /// Routes New Workspace through the selected machine or the normal local action.
@@ -19,19 +20,11 @@ extension AppDelegate {
         if let context {
             let target = newWorkspaceMachineContext(for: context).target
             if case .unavailable = target {
-                presentCloudWorkspaceCreationFailure(
-                    machineID: "",
-                    error: CloudWorkspaceCoordinatorError.machineUnavailable(""),
-                    windowID: context.windowId,
-                    retry: { [weak self, weak preferredTabManager] in
-                        _ = self?.performNewWorkspaceAction(
-                            tabManager: preferredTabManager,
-                            event: event,
-                            debugSource: "\(debugSource).retry",
-                            skipConfiguredAction: skipConfiguredAction
-                        )
-                    }
-                )
+                let alert = NSAlert()
+                alert.messageText = String(localized: "cloudWorkspace.creation.failed.title", defaultValue: "Couldn’t create Cloud workspace")
+                alert.informativeText = String(localized: "cloudWorkspace.creation.failed.unavailable", defaultValue: "The selected Cloud machine is unavailable.")
+                if let window = resolvedWindow(for: context) { alert.beginSheetModal(for: window) }
+                else { alert.runModal() }
                 return false
             }
             guard case .cloud(let machineID) = target else {
@@ -104,87 +97,53 @@ extension AppDelegate {
         let capturedMachineID = machineID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !capturedMachineID.isEmpty else { return false }
         return operationController.start(key: "new-cloud-workspace.machine:\(capturedMachineID)") { [weak self] in
-            do {
-                guard let workspaceID = try await coordinator.createOnMachine(
-                    machineID: capturedMachineID, focus: focus, windowID: windowID
-                ), !Task.isCancelled, coordinator.isAvailable else { return }
+            while !Task.isCancelled, coordinator.isAvailable {
+                do {
+                    guard let workspaceID = try await coordinator.createOnMachine(
+                        machineID: capturedMachineID, focus: focus, windowID: windowID
+                    ), !Task.isCancelled, coordinator.isAvailable else { return }
 #if DEBUG
-                cmuxDebugLog(
-                    "newWorkspace.cloud.completed source=\(debugSource) machine=\(capturedMachineID) " +
-                        "workspace=\(workspaceID.uuidString.prefix(8))"
-                )
+                    cmuxDebugLog("newWorkspace.cloud.completed source=\(debugSource) workspace=\(workspaceID.uuidString.prefix(8))")
 #endif
-                destination?.apply(workspaceID: workspaceID)
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                operationController.releaseKeyedOperation(
-                    key: "new-cloud-workspace.machine:\(capturedMachineID)"
-                )
-                self?.presentCloudWorkspaceCreationFailure(
-                    machineID: capturedMachineID,
-                    error: error,
-                    windowID: windowID,
-                    retry: { [weak self] in
-                        _ = self?.performNewCloudWorkspaceOnMachineAction(
-                            machineID: capturedMachineID,
-                            focus: focus,
-                            windowID: windowID,
-                            destination: destination,
-                            debugSource: "\(debugSource).retry"
-                        )
-                    }
-                )
-                // The alert is the user-facing terminal for this operation.
-                // Do not let the controller present a second generic failure.
-                return
+                    destination?.apply(workspaceID: workspaceID)
+                    return
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard !Task.isCancelled, coordinator.isAvailable else { return }
+                    Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.cmuxterm.app", category: "CloudWorkspace")
+                        .error("Cloud workspace creation failed: \(String(describing: error), privacy: .private)")
+                    guard await self?.presentCloudWorkspaceCreationFailure(error: error, windowID: windowID) == true else { return }
+                }
             }
         }
     }
 
-    /// Presents a safe, retryable Cloud workspace creation error.
-    private func presentCloudWorkspaceCreationFailure(
-        machineID: String,
-        error: Error,
-        windowID: UUID?,
-        retry: @escaping @MainActor () -> Void
-    ) {
+    /// Returns the recovery choice while the original keyed operation retains ownership.
+    private func presentCloudWorkspaceCreationFailure(error: Error, windowID: UUID?) async -> Bool {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = String(
-            localized: "cloudWorkspace.creation.failed.title",
-            defaultValue: "Couldn’t create Cloud workspace"
-        )
-        let machineName = SurfaceCatalog.shared.snapshot.machines.first {
-            $0.id == .cloud(machineID)
-        }?.name ?? String(localized: "cloudWorkspace.creation.cloudMachine", defaultValue: "Cloud machine")
-        let detailKey: String
+        alert.messageText = String(localized: "cloudWorkspace.creation.failed.title", defaultValue: "Couldn’t create Cloud workspace")
+        let detail: String
         if case CloudWorkspaceCoordinatorError.machineUnavailable = error {
-            detailKey = "cloudWorkspace.creation.failed.unavailable"
+            detail = String(localized: "cloudWorkspace.creation.failed.unavailable", defaultValue: "The selected Cloud machine is unavailable.")
         } else {
-            detailKey = "cloudWorkspace.creation.failed.generic"
+            detail = String(localized: "cloudWorkspace.creation.failed.generic", defaultValue: "The Cloud service could not create this workspace. Please try again.")
         }
-        let detail = String(localized: detailKey, defaultValue: detailKey == "cloudWorkspace.creation.failed.unavailable"
-            ? "The selected Cloud machine is unavailable."
-            : "The Cloud service could not create this workspace. Please try again.")
-        let format = String(
-            localized: "cloudWorkspace.creation.failed.detail",
-            defaultValue: "The workspace could not be created on %@. %@"
-        )
-        alert.informativeText = String(format: format, machineName, detail)
+        alert.informativeText = detail
         alert.addButton(withTitle: String(localized: "common.retry", defaultValue: "Retry"))
         alert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
-        CloudErrorCopy.install(in: alert, text: "\(alert.messageText)\n\(alert.informativeText)")
         let window = windowID.flatMap { id in
             mainWindowContexts.values.first(where: { $0.windowId == id }).flatMap { resolvedWindow(for: $0) }
         }
         if let window {
-            alert.beginSheetModal(for: window) { response in
-                if response == .alertFirstButtonReturn { retry() }
+            return await withCheckedContinuation { continuation in
+                alert.beginSheetModal(for: window) { response in
+                    continuation.resume(returning: response == .alertFirstButtonReturn)
+                }
             }
-        } else if alert.runModal() == .alertFirstButtonReturn {
-            retry()
         }
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     /// Creates a workspace on the persisted default machine through the app-owned operation controller.
@@ -200,7 +159,7 @@ extension AppDelegate {
         let context = preferredWindow.flatMap { contextForMainWindow($0) }
             ?? preferredMainWindowContextForWorkspaceCreation(event: nil, debugSource: debugSource)
         let focus = context?.tabManager.selectedTabId != nil
-        // Cmd+Y is one logical create-and-open intent. Coalesce repeated key
+        // Default-machine creation is one logical intent. Coalesce repeated key
         // events while the remote receipt is still being discovered/attached.
         let operationKey = coordinator.defaultMachineStore.machineID.map {
             "new-cloud-workspace.machine:\($0)"
@@ -211,6 +170,20 @@ extension AppDelegate {
                   coordinator.isAvailable else { return }
             destination?.apply(workspaceID: workspaceID)
         }
+    }
+
+    /// Creates on the VM captured by the shared New Workspace action.
+    @discardableResult
+    func performNewCloudWorkspaceOnCurrentMachineAction(
+        tabManager: TabManager,
+        vmID: String,
+        destination: CloudWorkspaceGroupDestination? = nil
+    ) -> Bool {
+        let context = mainWindowContext(for: tabManager)
+        return performNewCloudWorkspaceOnMachineAction(
+            machineID: vmID, focus: true, windowID: context?.windowId,
+            destination: destination ?? context.flatMap { cloudWorkspaceGroupDestination(in: $0, machineID: vmID) }
+        )
     }
 
     /// Presents machine provisioning and applies its exact workspace receipt to a group when requested.

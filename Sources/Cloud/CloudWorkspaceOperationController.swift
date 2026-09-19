@@ -92,14 +92,6 @@ final class CloudWorkspaceOperationController {
         return true
     }
 
-    /// Releases a keyed slot before synchronous recovery UI invokes a retry.
-    /// The caller is the operation currently owning the key; the identity fence
-    /// in the deferred cleanup prevents an older task from removing a retry.
-    func releaseKeyedOperation(key: String) {
-        keyedTaskIDs.removeValue(forKey: key)
-        keyedTasks.removeValue(forKey: key)
-    }
-
     func cancelAll() {
         for task in tasks.values { task.cancel() }
         for task in keyedTasks.values { task.cancel() }

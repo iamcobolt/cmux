@@ -35,9 +35,19 @@ public final class CloudWorkspaceCoordinator {
         self.createWorkspaceWithContext = createWorkspaceWithContext
     }
 
-    /// Creates one workspace using a caller-owned task.
+    /// Creates a workspace on the specified cloud machine.
+    /// - Parameters:
+    ///   - id: The cloud machine identifier.
+    ///   - focus: Whether to focus the new local workspace.
+    /// - Returns: The exact created local workspace ID, or nil when unavailable.
+    /// - Throws: Cancellation or a cloud service failure.
+    public func createOnMachine(id: String, focus: Bool) async throws -> UUID? {
+        try await createOnMachine(machineID: id, focus: focus)
+    }
+
+    /// Creates a workspace on the persisted default cloud machine.
     /// - Parameter focus: Whether to focus the new local workspace.
-    /// - Returns: The exact created local workspace ID, or nil when unavailable or empty.
+    /// - Returns: The exact created local workspace ID, or nil when unavailable.
     /// - Throws: Cancellation or a cloud service failure.
     public func createOnDefaultMachine(focus: Bool) async throws -> UUID? {
         guard isAvailable else { return nil }

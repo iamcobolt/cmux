@@ -30,11 +30,11 @@ struct CloudWorkspaceMachineContextRoutingTests {
         let windowID = appDelegate.registerMainWindowContextForTesting(tabManager: tabManager, cmuxConfigStore: nil)
         defer { appDelegate.unregisterMainWindowContextForTesting(windowId: windowID) }
         let context = try #require(appDelegate.mainWindowContexts.values.first { $0.windowId == windowID })
-        appDelegate.setCloudTreeSelection(CloudTreeSelection(nodeID: "machine-b", machine: .cloud("machine-b")), in: tabManager)
+        context.cloudTreeSelectionStore.value = CloudTreeSelection(nodeID: "machine-b", machine: .cloud("machine-b"))
         context.keyboardFocusCoordinator.noteRightSidebarInteraction(mode: .machines)
 
         #expect(appDelegate.performNewWorkspaceAction(tabManager: tabManager, debugSource: "test.cmdN.machine"))
-        appDelegate.setCloudTreeSelection(CloudTreeSelection(nodeID: "machine-a", machine: .cloud("machine-a")), in: tabManager)
+        context.cloudTreeSelectionStore.value = CloudTreeSelection(nodeID: "machine-a", machine: .cloud("machine-a"))
         await appDelegate.cloudWorkspaceOperationController?.waitForPendingOperations()
         #expect(createdMachine == "machine-b")
     }

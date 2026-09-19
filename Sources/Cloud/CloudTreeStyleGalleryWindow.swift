@@ -77,6 +77,7 @@ private struct CloudTreeStyleGalleryColumn: View {
     let select: () -> Void
 
     @State private var expansionStore = CloudTreeExpansionStore()
+    @State private var selectionStore = CloudTreeSelectionStore()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -104,7 +105,7 @@ private struct CloudTreeStyleGalleryColumn: View {
                 machines: [],
                 snapshot: snapshot,
                 localWorkspaces: localWorkspaces,
-                selectionStore: CloudTreeSelectionStore(),
+                selectionStore: selectionStore,
                 machineActions: MachineRowActions.bound(onDidMutate: {}),
                 nodeActions: CloudTreeNodeActions.bound(
                     catalog: { SurfaceCatalog.shared },
