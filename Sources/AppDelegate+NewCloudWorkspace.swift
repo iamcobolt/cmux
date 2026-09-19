@@ -5,6 +5,7 @@ import Foundation
 // MARK: - New Cloud Workspace (Cmd+Y)
 
 extension AppDelegate {
+    /// Routes New Workspace through the selected machine or the normal local action.
     @discardableResult
     func performNewWorkspaceAction(
         tabManager preferredTabManager: TabManager? = nil,
@@ -18,7 +19,19 @@ extension AppDelegate {
         if let context {
             let target = newWorkspaceMachineContext(for: context).target
             if case .unavailable = target {
-                NSSound.beep()
+                presentCloudWorkspaceCreationFailure(
+                    machineID: "",
+                    error: CloudWorkspaceCoordinatorError.machineUnavailable(""),
+                    windowID: context.windowId,
+                    retry: { [weak self, weak preferredTabManager] in
+                        _ = self?.performNewWorkspaceAction(
+                            tabManager: preferredTabManager,
+                            event: event,
+                            debugSource: "\(debugSource).retry",
+                            skipConfiguredAction: skipConfiguredAction
+                        )
+                    }
+                )
                 return false
             }
             guard case .cloud(let machineID) = target else {
@@ -59,23 +72,16 @@ extension AppDelegate {
         )
     }
 
-    /// Records the Machines tree selection for the owning window. The active
-    /// focus coordinator decides later whether this selection is authoritative.
-    func setCloudTreeSelection(_ selection: CloudTreeSelection, in tabManager: TabManager?) {
-        guard let tabManager,
-              let context = mainWindowContext(for: tabManager) else { return }
-        context.cloudTreeSelection = selection
-    }
-
-    func cloudTreeSelection(for tabManager: TabManager?) -> CloudTreeSelection {
-        guard let tabManager else { return .empty }
-        return mainWindowContext(for: tabManager)?.cloudTreeSelection ?? .empty
+    /// Returns the window-owned Cloud selection store for a tab manager.
+    func cloudTreeSelectionStore(for tabManager: TabManager?) -> CloudTreeSelectionStore? {
+        guard let tabManager else { return nil }
+        return mainWindowContext(for: tabManager)?.cloudTreeSelectionStore
     }
 
     /// Resolves the target before any async Cloud operation starts.
     func newWorkspaceMachineContext(for context: MainWindowContext) -> CloudWorkspaceMachineContext {
         CloudWorkspaceMachineContext(
-            selection: context.cloudTreeSelection.machine,
+            selection: context.cloudTreeSelectionStore.value.machine,
             selectedWorkspaceCloudMachineID: context.tabManager.selectedWorkspace?.cloudVMBinding?.vmID,
             machinesPanelOwnsFocus: context.keyboardFocusCoordinator.activeRightSidebarMode == .machines
         )
@@ -97,35 +103,46 @@ extension AppDelegate {
               coordinator.isAvailable else { return false }
         let capturedMachineID = machineID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !capturedMachineID.isEmpty else { return false }
-        return operationController.start(key: "new-cloud-workspace.machine:\(capturedMachineID)", {
-            guard let workspaceID = try await coordinator.createOnMachine(
-                machineID: capturedMachineID, focus: focus, windowID: windowID
-            ), !Task.isCancelled, coordinator.isAvailable else { return }
+        return operationController.start(key: "new-cloud-workspace.machine:\(capturedMachineID)") { [weak self] in
+            do {
+                guard let workspaceID = try await coordinator.createOnMachine(
+                    machineID: capturedMachineID, focus: focus, windowID: windowID
+                ), !Task.isCancelled, coordinator.isAvailable else { return }
 #if DEBUG
-            cmuxDebugLog(
-                "newWorkspace.cloud.completed source=\(debugSource) machine=\(capturedMachineID) " +
-                    "workspace=\(workspaceID.uuidString.prefix(8))"
-            )
+                cmuxDebugLog(
+                    "newWorkspace.cloud.completed source=\(debugSource) machine=\(capturedMachineID) " +
+                        "workspace=\(workspaceID.uuidString.prefix(8))"
+                )
 #endif
-            destination?.apply(workspaceID: workspaceID)
-        }, onFailure: { [weak self] error in
-            self?.presentCloudWorkspaceCreationFailure(
-                machineID: capturedMachineID,
-                error: error,
-                windowID: windowID,
-                retry: { [weak self] in
-                    _ = self?.performNewCloudWorkspaceOnMachineAction(
-                        machineID: capturedMachineID,
-                        focus: focus,
-                        windowID: windowID,
-                        destination: destination,
-                        debugSource: "\(debugSource).retry"
-                    )
-                }
-            )
-        })
+                destination?.apply(workspaceID: workspaceID)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                operationController.releaseKeyedOperation(
+                    key: "new-cloud-workspace.machine:\(capturedMachineID)"
+                )
+                self?.presentCloudWorkspaceCreationFailure(
+                    machineID: capturedMachineID,
+                    error: error,
+                    windowID: windowID,
+                    retry: { [weak self] in
+                        _ = self?.performNewCloudWorkspaceOnMachineAction(
+                            machineID: capturedMachineID,
+                            focus: focus,
+                            windowID: windowID,
+                            destination: destination,
+                            debugSource: "\(debugSource).retry"
+                        )
+                    }
+                )
+                // The alert is the user-facing terminal for this operation.
+                // Do not let the controller present a second generic failure.
+                return
+            }
+        }
     }
 
+    /// Presents a safe, retryable Cloud workspace creation error.
     private func presentCloudWorkspaceCreationFailure(
         machineID: String,
         error: Error,
@@ -138,19 +155,23 @@ extension AppDelegate {
             localized: "cloudWorkspace.creation.failed.title",
             defaultValue: "Couldn’t create Cloud workspace"
         )
+        let machineName = SurfaceCatalog.shared.snapshot.machines.first {
+            $0.id == .cloud(machineID)
+        }?.name ?? String(localized: "cloudWorkspace.creation.cloudMachine", defaultValue: "Cloud machine")
+        let detailKey: String
+        if case CloudWorkspaceCoordinatorError.machineUnavailable = error {
+            detailKey = "cloudWorkspace.creation.failed.unavailable"
+        } else {
+            detailKey = "cloudWorkspace.creation.failed.generic"
+        }
+        let detail = String(localized: detailKey, defaultValue: detailKey == "cloudWorkspace.creation.failed.unavailable"
+            ? "The selected Cloud machine is unavailable."
+            : "The Cloud service could not create this workspace. Please try again.")
         let format = String(
             localized: "cloudWorkspace.creation.failed.detail",
             defaultValue: "The workspace could not be created on %@. %@"
         )
-        let detail: String = if case CloudWorkspaceCoordinatorError.machineUnavailable = error {
-            String(
-                localized: "cloudWorkspace.creation.failed.unavailable",
-                defaultValue: "The selected Cloud machine is unavailable."
-            )
-        } else {
-            error.localizedDescription
-        }
-        alert.informativeText = String(format: format, machineID, detail)
+        alert.informativeText = String(format: format, machineName, detail)
         alert.addButton(withTitle: String(localized: "common.retry", defaultValue: "Retry"))
         alert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
         CloudErrorCopy.install(in: alert, text: "\(alert.messageText)\n\(alert.informativeText)")
