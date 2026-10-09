@@ -107,6 +107,41 @@ struct CloudBrowserProxyIntegrationTests {
         await model.retire()
     }
 
+    @Test("Managed SSH loopback content rules compile in WebKit")
+    func managedSSHLoopbackProtectionRuleCompiles() async throws {
+        let panel = BrowserPanel(
+            workspaceId: UUID(), initialURL: URL(string: "about:blank"),
+            preloadInitialNavigationInBackground: false, websiteDataStore: .nonPersistent()
+        )
+        defer { panel.close() }
+
+        let target = CloudPortForwardTarget(host: "127.0.0.1", port: 3000)
+        let model = CloudPortAccessModel(
+            target: target, coordinator: nil, wake: {},
+            startForward: { _ in 49123 }, stopForward: {}, route: .loopback, allowsLoopback: true
+        )
+        let remoteURL = try #require(URL(string: "http://127.0.0.1:3000/"))
+        panel.cloudAccess.configure(model: model, url: remoteURL)
+        panel.cloudAccess.automaticallyNavigate { _ in }
+        let generation = UUID()
+        panel.cloudLoopbackProtectionGeneration = generation
+        model.connect()
+        let readyDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while (panel.cloudAccess.navigationURL == nil || !model.isReady) && ContinuousClock.now < readyDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let forwardedURL = try #require(panel.cloudAccess.navigationURL)
+        #expect(model.isReady)
+        #expect(panel.cloudAccess.owns(forwardedURL))
+        try await panel.installManagedSSHLoopbackProtection(
+            for: forwardedURL, generation: generation, scriptGeneration: 1
+        )
+        #expect(panel.cloudLoopbackContentRuleList != nil,
+                "The managed SSH loopback rules must compile and attach to WebKit")
+        panel.removeManagedSSHLoopbackProtection()
+        await model.retire()
+    }
+
     @Test("Managed SSH loopback navigation uses its forward and never reaches a client-local service")
     func managedSSHLoopbackPOSTUsesRemoteForward() async throws {
         let clientService = try CloudLoopbackOriginTestServer(marker: "client-local")
@@ -213,7 +248,8 @@ struct CloudBrowserProxyIntegrationTests {
               ContinuousClock.now < fetchDeadline {
             try await Task.sleep(for: .milliseconds(10))
         }
-        #expect(remoteService.requests.contains(where: { $0.target.contains("from=fetch") }),
+        let forwardedFetchWasObserved = remoteService.requests.contains { $0.target.contains("from=fetch") }
+        #expect(forwardedFetchWasObserved,
                 "Absolute loopback fetches must be rewritten to the owned SSH endpoint")
         let unrelatedLoopbackURLs = try await panel.webView.evaluateJavaScript("""
         [
@@ -242,6 +278,17 @@ struct CloudBrowserProxyIntegrationTests {
         #expect(blockedImageResults == ["blocked", "blocked", "blocked", "blocked"])
         #expect(clientService.requests.isEmpty,
                 "Unrewritten parser-style localhost resources must be blocked instead of reaching a local service")
+        let rootURL = try #require(URL(string: "http://127.0.0.1:\(clientService.port)"))
+        #expect(panel.navigate(to: rootURL) != nil)
+        let rootDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while !remoteService.requests.contains(where: { $0.method == "GET" && $0.target == "/" }),
+              ContinuousClock.now < rootDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let rootRequestWasForwarded = remoteService.requests.contains { $0.method == "GET" && $0.target == "/" }
+        #expect(rootRequestWasForwarded,
+                "A rewritten root URL without an explicit path must pass the SSH loopback protection rule")
+        #expect(clientService.requests.isEmpty)
         let secondURL = try #require(URL(string: "http://127.0.0.1:\(clientService.port)/next"))
         #expect(panel.navigate(to: secondURL) != nil)
         let nextDeadline = ContinuousClock.now.advanced(by: .seconds(10))
@@ -249,7 +296,8 @@ struct CloudBrowserProxyIntegrationTests {
               ContinuousClock.now < nextDeadline {
             try await Task.sleep(for: .milliseconds(10))
         }
-        #expect(remoteService.requests.contains(where: { $0.method == "GET" && $0.target == "/next" }),
+        let nextRequestWasForwarded = remoteService.requests.contains { $0.method == "GET" && $0.target == "/next" }
+        #expect(nextRequestWasForwarded,
                 "Subsequent address-bar navigation must use the same SSH forward")
         #expect(clientService.requests.isEmpty)
         await model.retire()

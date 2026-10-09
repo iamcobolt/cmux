@@ -774,7 +774,22 @@ final class BrowserPanelFileSystemAccessBridgeTests: XCTestCase {
 
 @MainActor
 final class BrowserPanelInitialNavigationTests: XCTestCase {
-    func testRemoteTuiPublicNavigationDoesNotWaitForLegacyProxyEndpoint() throws {
+    func testRemoteTuiPublicIPAddressDoesNotWaitForLegacyProxyEndpoint() throws {
+        let url = try XCTUnwrap(URL(string: "https://8.8.8.8/"))
+        let panel = BrowserPanel(
+            workspaceId: UUID(),
+            renderInitialNavigation: false,
+            isRemoteWorkspace: true,
+            allowsLocalNavigationWithoutRemoteProxy: true
+        )
+
+        let navigation = panel.navigateWithoutInsecureHTTPPrompt(to: url, recordTypedNavigation: false)
+
+        XCTAssertNotNil(navigation)
+        XCTAssertFalse(panel.hasPendingRemoteNavigation)
+    }
+
+    func testRemoteTuiPublicHostnameDoesNotWaitForLegacyProxyEndpoint() throws {
         let url = try XCTUnwrap(URL(string: "https://example.com/"))
         let panel = BrowserPanel(
             workspaceId: UUID(),
@@ -791,6 +806,21 @@ final class BrowserPanelInitialNavigationTests: XCTestCase {
 
     func testRemoteTuiLoopbackRequestDoesNotFallThroughToLocalBrowser() throws {
         let url = try XCTUnwrap(URL(string: "http://127.0.0.1:49210/"))
+        let panel = BrowserPanel(
+            workspaceId: UUID(),
+            renderInitialNavigation: false,
+            isRemoteWorkspace: true,
+            allowsLocalNavigationWithoutRemoteProxy: true
+        )
+
+        let navigation = panel.navigateWithoutInsecureHTTPPrompt(to: url, recordTypedNavigation: false)
+
+        XCTAssertNil(navigation)
+        XCTAssertTrue(panel.hasPendingRemoteNavigation)
+    }
+
+    func testRemoteTuiPrivateLocalHostnameRemainsQueuedWithoutProxy() throws {
+        let url = try XCTUnwrap(URL(string: "http://printer.local/"))
         let panel = BrowserPanel(
             workspaceId: UUID(),
             renderInitialNavigation: false,
@@ -821,6 +851,7 @@ final class BrowserPanelInitialNavigationTests: XCTestCase {
 
         XCTAssertNotNil(navigation)
         XCTAssertFalse(panel.hasPendingRemoteNavigation)
+        XCTAssertEqual(panel.currentURL, publicURL)
     }
 
     func testRemoteTuiRoutePreservesRequestWhenRewritingItsURL() throws {
