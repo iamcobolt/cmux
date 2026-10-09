@@ -20,6 +20,8 @@ actor SSHTuiLinkManager: RemoteTuiLinkManaging {
     private let isEnabled: @Sendable () -> Bool
     /// Read at each carrier start, so an Integrations toggle applies on the next connect.
     private let agentHookProviders: @Sendable () -> [String]
+    // Test hook signals that a concurrent caller joined the in-flight start.
+    private let onLoopbackForwardJoin: @Sendable () -> Void
     private var current: CloudMachineLink?
     private var connecting: Task<CloudMachineLink.Connected, Error>?
     private var checking: Task<Void, Error>?
@@ -31,13 +33,15 @@ actor SSHTuiLinkManager: RemoteTuiLinkManaging {
     init(connection: SSHTuiConnection, clientURL: URL, paths: CloudTuiClientPaths,
          listenerRegistry: SSHTuiLoopbackListenerLeaseRegistry = SSHTuiLoopbackListenerLeaseRegistry(),
          isEnabled: @escaping @Sendable () -> Bool,
-         agentHookProviders: @escaping @Sendable () -> [String] = { [] }) {
+         agentHookProviders: @escaping @Sendable () -> [String] = { [] },
+         onLoopbackForwardJoin: @escaping @Sendable () -> Void = {}) {
         self.connection = connection
         self.clientURL = clientURL
         self.paths = paths
         self.listenerRegistry = listenerRegistry
         self.isEnabled = isEnabled
         self.agentHookProviders = agentHookProviders
+        self.onLoopbackForwardJoin = onLoopbackForwardJoin
     }
 
     func connected(machineID: String) async throws -> CloudMachineLink.Connected {
@@ -163,7 +167,10 @@ actor SSHTuiLinkManager: RemoteTuiLinkManaging {
             throw CancellationError()
         }
         let key = LoopbackForwardKey(machineID: machineID, host: target.host.lowercased(), port: target.port)
-        if let starting = loopbackForwardStarts[key] { return try await starting.value }
+        if let starting = loopbackForwardStarts[key] {
+            onLoopbackForwardJoin()
+            return try await starting.value
+        }
         let task = Task { try await self.startLoopbackForward(machineID: machineID, target: target, key: key) }
         loopbackForwardStarts[key] = task
         defer { if loopbackForwardStarts[key] == task { loopbackForwardStarts[key] = nil } }

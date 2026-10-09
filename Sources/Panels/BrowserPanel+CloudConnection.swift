@@ -19,13 +19,13 @@ extension BrowserPanel {
                 return
             }
             self.cloudLoopbackProtectionTask?.cancel()
+            let generation = UUID()
+            self.cloudLoopbackProtectionGeneration = generation
+            self.cloudLoopbackScriptGeneration += 1
+            let scriptGeneration = self.cloudLoopbackScriptGeneration
             self.cloudLoopbackProtectionTask = Task { @MainActor [weak self, weak model] in
                 guard let self, let model, !self.isClosingWebViewLifecycle else { return }
                 self.prepareCloudBrowserNavigation()
-                let generation = UUID()
-                self.cloudLoopbackProtectionGeneration = generation
-                self.cloudLoopbackScriptGeneration += 1
-                let scriptGeneration = self.cloudLoopbackScriptGeneration
                 do {
                     try await self.installManagedSSHLoopbackProtection(
                         for: url, generation: generation, scriptGeneration: scriptGeneration

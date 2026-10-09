@@ -8,10 +8,8 @@ import Foundation
 /// allowing another local service to claim the old browser URL.
 final class SSHTuiLoopbackListenerLease: @unchecked Sendable {
     private let descriptor: Int32
-    private let lock = NSLock()
     private let queue = DispatchQueue(label: "com.cmuxterm.ssh-loopback-listener")
     private var unavailableSource: DispatchSourceRead?
-    private var closed = false
     private var childGeneration: UInt64 = 0
 
     let port: UInt16
@@ -84,12 +82,10 @@ final class SSHTuiLoopbackListenerLease: @unchecked Sendable {
         // Drain any in-flight 503 accept handler before a new child starts
         // consuming from the shared socket's accept queue.
         queue.sync {
-            lock.lock()
             childGeneration &+= 1
             let generation = childGeneration
             let source = unavailableSource
             unavailableSource = nil
-            lock.unlock()
             source?.cancel()
             return generation
         }
@@ -97,14 +93,9 @@ final class SSHTuiLoopbackListenerLease: @unchecked Sendable {
 
     func childDidStop(generation: UInt64) {
         queue.sync {
-            lock.lock()
-            guard !closed, childGeneration == generation, unavailableSource == nil else {
-                lock.unlock()
-                return
-            }
+            guard childGeneration == generation, unavailableSource == nil else { return }
             let source = DispatchSource.makeReadSource(fileDescriptor: descriptor, queue: queue)
             unavailableSource = source
-            lock.unlock()
             source.setEventHandler { [weak self] in self?.rejectPendingConnections(generation: generation) }
             source.resume()
         }
@@ -112,10 +103,7 @@ final class SSHTuiLoopbackListenerLease: @unchecked Sendable {
 
     private func rejectPendingConnections(generation: UInt64) {
         while true {
-            lock.lock()
-            let isCurrent = !closed && childGeneration == generation && unavailableSource != nil
-            lock.unlock()
-            guard isCurrent else { return }
+            guard childGeneration == generation, unavailableSource != nil else { return }
             let client = Darwin.accept(descriptor, nil, nil)
             guard client >= 0 else { return }
             var noSignal: Int32 = 1
@@ -145,13 +133,18 @@ final class SSHTuiLoopbackListenerLease: @unchecked Sendable {
     }
 
     deinit {
-        lock.lock()
-        closed = true
+        let descriptor = self.descriptor
         let source = unavailableSource
         unavailableSource = nil
-        lock.unlock()
-        source?.cancel()
-        Darwin.close(descriptor)
+        if let source {
+            // DispatchSourceRead handlers and this teardown share queue-owned
+            // state. Keep the descriptor open until Dispatch confirms cancellation;
+            // deinit may run on the source queue, so it must not synchronously hop there.
+            source.setCancelHandler { Darwin.close(descriptor) }
+            source.cancel()
+        } else {
+            Darwin.close(descriptor)
+        }
     }
 }
 
@@ -166,8 +159,16 @@ actor SSHTuiLoopbackListenerLeaseRegistry {
 
     private let maximumLeases = 64
     private var leases: [Key: SSHTuiLoopbackListenerLease] = [:]
+    private let onLeaseRequest: (@Sendable () async -> Void)?
 
-    func lease(machineID: String, target: CloudPortForwardTarget) throws -> SSHTuiLoopbackListenerLease {
+    init(onLeaseRequest: (@Sendable () async -> Void)? = nil) {
+        self.onLeaseRequest = onLeaseRequest
+    }
+
+    func lease(machineID: String, target: CloudPortForwardTarget) async throws -> SSHTuiLoopbackListenerLease {
+        if let onLeaseRequest {
+            await onLeaseRequest()
+        }
         let key = Key(machineID: machineID, host: target.host.lowercased(), port: target.port)
         if let existing = leases[key] { return existing }
         guard leases.count < maximumLeases else {

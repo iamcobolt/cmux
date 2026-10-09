@@ -844,13 +844,19 @@ final class BrowserPanelInitialNavigationTests: XCTestCase {
             allowsLocalNavigationWithoutRemoteProxy: true
         )
 
-        _ = panel.navigateWithoutInsecureHTTPPrompt(to: loopbackURL, recordTypedNavigation: false)
+        var queuedNavigationWasSuperseded = false
+        _ = panel.navigateWithoutInsecureHTTPPrompt(
+            to: loopbackURL,
+            recordTypedNavigation: false,
+            onNavigationStarted: { queuedNavigationWasSuperseded = $0 == nil }
+        )
         XCTAssertTrue(panel.hasPendingRemoteNavigation)
 
         let navigation = panel.navigateWithoutInsecureHTTPPrompt(to: publicURL, recordTypedNavigation: false)
 
         XCTAssertNotNil(navigation)
         XCTAssertFalse(panel.hasPendingRemoteNavigation)
+        XCTAssertTrue(queuedNavigationWasSuperseded)
     }
 
     func testRemoteTuiRoutePreservesRequestWhenRewritingItsURL() throws {
