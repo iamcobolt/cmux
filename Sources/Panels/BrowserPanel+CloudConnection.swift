@@ -18,7 +18,8 @@ extension BrowserPanel {
                 _ = self.navigate(to: url)
                 return
             }
-            Task { @MainActor [weak self, weak model] in
+            self.cloudLoopbackProtectionTask?.cancel()
+            self.cloudLoopbackProtectionTask = Task { @MainActor [weak self, weak model] in
                 guard let self, let model, !self.isClosingWebViewLifecycle else { return }
                 self.prepareCloudBrowserNavigation()
                 let generation = UUID()
@@ -140,6 +141,8 @@ extension BrowserPanel {
     }
 
     func removeManagedSSHLoopbackProtection(restoreGeneralBridge: Bool = false) {
+        cloudLoopbackProtectionTask?.cancel()
+        cloudLoopbackProtectionTask = nil
         cloudLoopbackProtectionGeneration = UUID()
         cloudLoopbackScriptGeneration += 1
         let controller = webView.configuration.userContentController

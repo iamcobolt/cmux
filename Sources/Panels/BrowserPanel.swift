@@ -2095,6 +2095,7 @@ final class BrowserPanel: Panel, ObservableObject {
     var cloudLoopbackRuntimeBridgeScript: WKUserScript?
     var cloudLoopbackProtectionGeneration = UUID()
     var cloudLoopbackScriptGeneration = 0
+    var cloudLoopbackProtectionTask: Task<Void, Never>?
     var cloudLoopbackScriptConfigurationKey: String?
     /// Saved Cloud path waiting for a provider/resource to become available.
     /// It is consumed after the first successful authenticated configuration.

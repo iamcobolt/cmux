@@ -12,6 +12,44 @@ import Testing
 @MainActor
 @Suite("Cloud browser route adoption")
 struct CloudBrowserRouteAdoptionTests {
+    @Test("Removing a queued SSH loopback navigation prevents stale rule installation")
+    func removedQueuedLoopbackProtectionCannotInstallOrNavigate() async throws {
+        let target = CloudPortForwardTarget(host: "127.0.0.1", port: 3000)
+        let model = CloudPortAccessModel(
+            target: target, coordinator: nil, wake: {},
+            startForward: { _ in 42_000 }, stopForward: {}, route: .loopback, allowsLoopback: true
+        )
+        model.connect()
+        try #require(await wait { model.isReady })
+
+        // Positive control: the same ready model compiles and attaches its rule.
+        let control = BrowserPanel(workspaceId: UUID())
+        defer { control.close() }
+        control.cloudAccess.configure(model: model, url: URL(string: "http://127.0.0.1:3000/")!)
+        control.bindCloudBrowserNavigation()
+        let controlTask = try #require(control.cloudLoopbackProtectionTask)
+        await controlTask.value
+        #expect(control.cloudLoopbackContentRuleList != nil)
+        #expect(control.cloudAccess.navigationURL?.port == 42_000)
+        #expect(control.webView.url?.port == 42_000)
+
+        let panel = BrowserPanel(workspaceId: UUID())
+        defer { panel.close() }
+        panel.cloudAccess.configure(model: model, url: URL(string: "http://127.0.0.1:3000/")!)
+        panel.bindCloudBrowserNavigation()
+        let queuedTask = try #require(panel.cloudLoopbackProtectionTask)
+        panel.removeManagedSSHLoopbackProtection()
+        let invalidatedGeneration = panel.cloudLoopbackProtectionGeneration
+        await queuedTask.value
+
+        #expect(panel.cloudLoopbackProtectionGeneration == invalidatedGeneration)
+        #expect(panel.cloudLoopbackContentRuleList == nil)
+        #expect(panel.cloudLoopbackScriptConfigurationKey == nil)
+        #expect(panel.cloudAccess.navigationURL?.port == 42_000)
+        #expect(panel.webView.url?.port != 42_000)
+        await model.retire()
+    }
+
     @Test("A committed same-VM redirect retains readiness without replaying navigation")
     func committedRouteIsObservedInPlace() async throws {
         let state = CloudBrowserAccessState()
@@ -42,5 +80,11 @@ struct CloudBrowserRouteAdoptionTests {
         #expect(state.model === model)
         #expect(state.remoteURL == redirected)
         #expect(navigationRequests == 0)
+    }
+
+    private func wait(_ condition: @MainActor () -> Bool) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while !condition(), ContinuousClock.now < deadline { await Task.yield() }
+        return condition()
     }
 }
