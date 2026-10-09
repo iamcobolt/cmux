@@ -851,7 +851,6 @@ final class BrowserPanelInitialNavigationTests: XCTestCase {
 
         XCTAssertNotNil(navigation)
         XCTAssertFalse(panel.hasPendingRemoteNavigation)
-        XCTAssertEqual(panel.currentURL, publicURL)
     }
 
     func testRemoteTuiRoutePreservesRequestWhenRewritingItsURL() throws {

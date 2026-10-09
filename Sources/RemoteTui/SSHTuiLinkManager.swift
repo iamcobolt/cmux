@@ -177,9 +177,9 @@ actor SSHTuiLinkManager: RemoteTuiLinkManaging {
     ) async throws -> UInt16 {
         _ = try await connected(machineID: machineID)
         if let process = loopbackForwards[key] {
-            if let port = await process.readyPort { return port }
+            if let port = await process.readyPort, loopbackForwards[key] === process { return port }
             await process.stop()
-            loopbackForwards[key] = nil
+            if loopbackForwards[key] === process { loopbackForwards[key] = nil }
         }
         let listener = try await listenerRegistry.lease(machineID: machineID, target: target)
         try Task.checkCancellation()
