@@ -162,15 +162,27 @@ actor SSHTuiLinkManager: RemoteTuiLinkManaging {
               ["127.0.0.1", "localhost", "::1"].contains(target.host.lowercased()) else {
             throw CancellationError()
         }
-        _ = try await connected(machineID: machineID)
         let key = LoopbackForwardKey(machineID: machineID, host: target.host.lowercased(), port: target.port)
         if let starting = loopbackForwardStarts[key] { return try await starting.value }
+        let task = Task { try await self.startLoopbackForward(machineID: machineID, target: target, key: key) }
+        loopbackForwardStarts[key] = task
+        defer { if loopbackForwardStarts[key] == task { loopbackForwardStarts[key] = nil } }
+        return try await task.value
+    }
+
+    private func startLoopbackForward(
+        machineID: String,
+        target: CloudPortForwardTarget,
+        key: LoopbackForwardKey
+    ) async throws -> UInt16 {
+        _ = try await connected(machineID: machineID)
         if let process = loopbackForwards[key] {
             if let port = await process.readyPort { return port }
             await process.stop()
             loopbackForwards[key] = nil
         }
         let listener = try await listenerRegistry.lease(machineID: machineID, target: target)
+        try Task.checkCancellation()
         let process = SSHTuiLoopbackForwardProcess()
         loopbackForwards[key] = process
         let arguments = connection.forwardArguments(stateDirectory: paths.stateDir.path, target: target)
@@ -179,8 +191,6 @@ actor SSHTuiLinkManager: RemoteTuiLinkManaging {
                                     environment: connection.sshProcessEnvironment,
                                     listener: listener)
         }
-        loopbackForwardStarts[key] = task
-        defer { if loopbackForwardStarts[key] == task { loopbackForwardStarts[key] = nil } }
         do {
             let port = try await task.value
             guard port > 0 else {
